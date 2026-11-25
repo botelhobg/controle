@@ -1,13 +1,36 @@
 from dataclasses import replace
 
+import certifi
 import pytest
 
 from labeer import deliveries, report_mail
 from labeer.config import DeploymentError, Settings, postgres_url
+from labeer.db import postgres_engine
 from labeer.reports import ReportError
 
 
 PG = "postgresql+psycopg://piloto:ficticia@postgres.example.test/labeer_piloto?sslmode=verify-full"
+
+
+def test_postgres_engine_resolves_system_roots_to_a_portable_ca_bundle():
+    url = postgres_url(PG)
+    engine = postgres_engine(url)
+    try:
+        assert engine.url.query["sslrootcert"] == certifi.where()
+        assert engine.url.query["sslmode"] == "verify-full"
+        assert url.query["sslrootcert"] == "system"
+    finally:
+        engine.dispose()
+
+
+def test_postgres_engine_preserves_an_explicit_certificate_authority():
+    url = postgres_url(PG + "&sslrootcert=/caminho/ca.pem")
+    engine = postgres_engine(url)
+    try:
+        assert engine.url.query["sslrootcert"] == "/caminho/ca.pem"
+        assert engine.url.query["sslmode"] == "verify-full"
+    finally:
+        engine.dispose()
 
 
 def test_local_mode_only_accepts_a_loopback_service_with_sqlite():

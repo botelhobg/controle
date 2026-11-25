@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Iterator
 
+import certifi
 from sqlalchemy import Connection, Engine, create_engine, inspect, text
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -22,6 +23,10 @@ POSTGRES_SCHEMA = "labeer"
 
 
 def postgres_engine(url: URL) -> Engine:
+    # O libpq binário pode não localizar as raízes do sistema no ambiente da nuvem.
+    # Use o pacote portátil de CAs, preservando verify-full e qualquer CA explícita.
+    if url.query.get("sslrootcert") == "system":
+        url = url.update_query_dict({"sslrootcert": certifi.where()})
     return create_engine(
         url, connect_args={
             "connect_timeout": 8, "prepare_threshold": None, "gssencmode": "disable",
