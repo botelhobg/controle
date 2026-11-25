@@ -10,6 +10,7 @@ from .accounts import (
     list_accounts, login, refresh_session, reset_account_password, set_account_active,
 )
 from .db import session_scope
+from .database_diagnostics import database_error_code
 from .security import MAX_LOGIN_LENGTH, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH
 
 
@@ -22,7 +23,8 @@ def write_account_error(error: Exception) -> None:
     if isinstance(error, ValueError):
         st.error(str(error))
     else:
-        st.error("Não foi possível acessar o banco neste momento. Tente novamente.")
+        st.error("Não foi possível acessar o banco neste momento. Tente novamente. "
+                 f"Diagnóstico: {database_error_code(error)}.")
 
 
 def authenticate() -> tuple[AccountView, Grant] | None:
