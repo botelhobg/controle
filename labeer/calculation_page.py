@@ -1,20 +1,24 @@
-"""Prévia de cálculos no Streamlit, sem atualizar resultados vigentes."""
+"""Simulação e gravação auditada de cálculos no Streamlit."""
 
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from dataclasses import dataclass
 from decimal import Decimal
 
 import streamlit as st
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from .account_page import write_account_error
+from .accounts import Grant, authorize_work
 from .calculations import FORMULAS, FORMULA_VERSION, INPUT_LABELS, calculate, decimal_text, parse_input
 from .db import session_scope
 from .importer import LEGACY_REFERENCE
 from .models import AnalysisExecution, AnalysisParameter, AuditEvent, CurrentResult, RequestedAnalysis, Sample, fq_code
-from .services import format_report_result, format_result
+from .services import calculation_snapshot, format_report_result, format_result, save_calculations, saved_brix
 
 
 REFERENCE_FIELDS = {
@@ -89,9 +93,20 @@ def suggested_values(
     return known
 
 
-def render_calculation_page() -> None:
+def calculation_save_key(sample_id: int, snapshot: dict, inputs: dict) -> str:
+    """Uma interação de uma tela antiga não aprova resultados ou entradas recém-alterados."""
+    payload = {"snapshot": snapshot, "formula_version": FORMULA_VERSION,
+               "inputs": {field: str(value) if value is not None else None for field, value in inputs.items()}}
+    digest = sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    return f"calc:save:{sample_id}:{digest}"
+
+
+def render_calculation_page(grant: Grant) -> None:
     st.header("Cálculos")
-    st.caption(f"Prévia das fórmulas da planilha LaBeer v{FORMULA_VERSION}. Nada é gravado no banco.")
+    notice = st.session_state.pop("calculation_notice", None)
+    if notice:
+        st.success(notice)
+    st.caption(f"Fórmulas da planilha LaBeer v{FORMULA_VERSION}. Simule ou salve os cálculos da amostra selecionada.")
     with session_scope() as db:
         samples = dict(db.execute(select(Sample.id, Sample.fq_number).order_by(Sample.fq_number)).all())
     sample_id = st.selectbox(
@@ -104,15 +119,23 @@ def render_calculation_page() -> None:
             select(AnalysisParameter).where(AnalysisParameter.key.in_(RELEVANT_PARAMETERS))
         )}
         registered, readings = load_preview_data(db, sample_id) if sample_id is not None else ({}, [])
+        snapshot = calculation_snapshot(db, sample_id) if sample_id is not None else {}
+        confirmed_brix, brix_event = saved_brix(db, sample_id) if sample_id is not None else (None, None)
 
     suggestions = suggested_values(registered, readings)
-    if len({r.value for r in readings if r.field == "brix"}) > 1:
+    if brix_event is not None:
+        # Uma remoção explícita não volta a preencher a leitura da planilha antiga.
+        suggestions.pop("brix", None)
+    if confirmed_brix is not None:
+        suggestions["brix"] = Reading("brix", confirmed_brix, "Leitura confirmada no aplicativo")
+    if brix_event is None and len({r.value for r in readings if r.field == "brix"}) > 1:
         st.warning("Há leituras diferentes de °Brix nesta amostra. Confira as origens e digite qual usar.")
     if "brix" in suggestions:
         st.caption("Confirme que a leitura de °Brix corresponde ao mesmo ensaio do extrato aparente.")
 
     columns = st.columns(3)
     inputs = {}
+    invalid = False
     for column, (field, label) in zip(columns, INPUT_LABELS.items()):
         suggestion = suggestions.get(field)
         default = decimal_text(suggestion.value if suggestion else None)
@@ -121,6 +144,7 @@ def render_calculation_page() -> None:
             inputs[field] = parse_input(field, typed)
         except ValueError as error:
             inputs[field] = None
+            invalid = True
             column.error(str(error))
         if inputs[field] is not None:
             source = suggestion.source if suggestion and inputs[field] == suggestion.value else "Digitado na prévia"
@@ -155,3 +179,23 @@ def render_calculation_page() -> None:
     carbs = calculations["carbohydrates"].value
     if carbs is not None and carbs < 0:
         st.warning("O modelo estimou carboidratos negativos. Revise as leituras; <0,1 é só a regra de exibição.")
+    if sample_id is None:
+        st.info("Simulação sem amostra: nenhum resultado será gravado.")
+        return
+    st.caption("Salvar confirma a leitura de °Brix desta amostra e atualiza apenas os parâmetros calculados "
+               "solicitados. Novas execuções de álcool ou extrato aparente recalculam seus dependentes. "
+               "Entradas ausentes deixam o cálculo pendente. Histórico e PDFs emitidos são preservados.")
+    if st.button("Salvar cálculos da amostra", type="primary", disabled=invalid,
+                 key=calculation_save_key(sample_id, snapshot, inputs)):
+        try:
+            with session_scope(lock_for_report=True) as db:
+                actor_id = authorize_work(db, grant)
+                updated = save_calculations(db, sample_id, inputs, actor_id=actor_id, expected_snapshot=snapshot)
+            message = f"Cálculos salvos: {len(updated.saved)} nova(s) execução(ões)."
+            if updated.pending:
+                names = ", ".join(parameters[key].name for key in updated.pending)
+                message += f" Pendentes por falta de entrada válida: {names}."
+            st.session_state["calculation_notice"] = message
+            st.rerun()
+        except (ValueError, SQLAlchemyError) as error:
+            write_account_error(error)

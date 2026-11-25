@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
-from .calculations import FORMULA_VERSION
+from .calculations import FORMULAS, FORMULA_VERSION, INPUT_LABELS, calculate, parse_input
 from .models import (
     AnalysisExecution,
     AnalysisParameter,
@@ -131,7 +133,7 @@ def create_sample(
     return sample
 
 
-def add_execution(
+def _append_execution(
     session: Session,
     requested: RequestedAnalysis,
     *,
@@ -139,6 +141,7 @@ def add_execution(
     text_value: str | None,
     notes: str | None,
     actor_id: int | None,
+    raw_inputs_json: str | None = None,
 ) -> AnalysisExecution:
     execution = AnalysisExecution(
         requested_analysis=requested,
@@ -148,6 +151,7 @@ def add_execution(
         notes=notes.strip() if notes else None,
         performed_by_id=actor_id,
         performed_at=utc_now(),
+        raw_inputs_json=raw_inputs_json,
     )
     session.add(execution)
     session.flush()
@@ -163,6 +167,158 @@ def add_execution(
         )
     requested.status = "Concluída"
     session.flush()
+    return execution
+
+
+CALCULATION_INPUTS = "calculation_inputs_saved"
+MEASURED_INPUTS = ("alcohol", "apparent_extract")
+
+
+@dataclass(frozen=True)
+class CalculationUpdate:
+    saved: tuple[str, ...]
+    pending: tuple[str, ...]
+
+
+def saved_brix(session: Session, sample_id: int) -> tuple[Decimal | None, int | None]:
+    """Apenas leituras confirmadas; referências importadas nunca são aceitas implicitamente."""
+    event = session.scalar(select(AuditEvent).where(
+        AuditEvent.entity_type == "sample", AuditEvent.entity_id == sample_id,
+        AuditEvent.action == CALCULATION_INPUTS,
+    ).order_by(AuditEvent.id.desc()).limit(1))
+    if event is None:
+        return None, None
+    value = json.loads(event.details_json)["brix"]
+    return parse_input("brix", value), event.id
+
+
+def calculation_snapshot(session: Session, sample_id: int) -> dict[str, int | None]:
+    """Identifica a tela revisada, inclusive mudanças concorrentes de leitura ou escopo."""
+    snapshot = dict(session.execute(
+        select(AnalysisParameter.key, CurrentResult.execution_id).select_from(RequestedAnalysis)
+        .join(RequestedAnalysis.parameter).outerjoin(RequestedAnalysis.current_result)
+        .where(RequestedAnalysis.sample_id == sample_id)
+    ).all())
+    snapshot["__brix__"] = saved_brix(session, sample_id)[1]
+    return snapshot
+
+
+def _calculation_requests(session: Session, sample_id: int) -> dict[str, RequestedAnalysis]:
+    return {r.parameter.key: r for r in session.scalars(
+        select(RequestedAnalysis).where(RequestedAnalysis.sample_id == sample_id)
+        .options(joinedload(RequestedAnalysis.parameter),
+                 joinedload(RequestedAnalysis.current_result).joinedload(CurrentResult.execution),
+                 selectinload(RequestedAnalysis.executions))
+    )}
+
+
+def _measured_values(requests: Mapping[str, RequestedAnalysis]) -> dict[str, Decimal | None]:
+    values = {}
+    for field in MEASURED_INPUTS:
+        request = requests.get(field)
+        execution = request.current_result.execution if request and request.current_result else None
+        try:
+            values[field] = parse_input(field, execution.numeric_value if execution else None)
+        except ValueError:
+            # Um resultado censurado ou fora do domínio não é uma entrada numérica válida.
+            values[field] = None
+    return values
+
+
+def refresh_calculated_results(
+    session: Session, sample_id: int, *, actor_id: int | None, changed_field: str | None = None,
+) -> CalculationUpdate:
+    """Acrescenta execuções dependentes na mesma transação; não altera medições nem PDFs."""
+    requests = _calculation_requests(session, sample_id)
+    brix, brix_event = saved_brix(session, sample_id)
+    values = {**_measured_values(requests), "brix": brix}
+    calculations = calculate(values)
+    saved, pending, executions, invalidated = [], [], {}, {}
+    for rule in FORMULAS:
+        fields = [field for field, _ in rule.terms]
+        request = requests.get(rule.key)
+        if (request is None or request.parameter.kind != "calculated"
+                or request.status not in {"Pendente", "Concluída"}
+                or (changed_field is not None and changed_field not in fields)):
+            continue
+        result = calculations[rule.key]
+        if result.value is None or not -80 <= result.value.as_tuple().exponent <= 80:
+            pending.append(rule.key)
+            if request.current_result:
+                invalidated[rule.key] = request.current_result.execution_id
+                # Remove só a seleção vigente. As execuções antigas continuam no histórico.
+                request.current_result = None
+            request.status = "Pendente"
+            continue
+        provenance = {
+            "type": "calculated", "formula_key": rule.key,
+            "formula_version": rule.version, "formula_source": rule.source,
+            "inputs": {field: str(values[field]) for field in fields},
+            "source_executions": {
+                field: requests[field].current_result.execution_id for field in fields if field in MEASURED_INPUTS
+            },
+        }
+        if "brix" in fields:
+            provenance["brix_reading_id"] = brix_event
+        raw = json.dumps(provenance, sort_keys=True, ensure_ascii=False)
+        current = request.current_result.execution if request.current_result else None
+        if (current and current.numeric_value == result.value and current.text_value is None
+                and current.raw_inputs_json == raw and request.status == "Concluída"):
+            continue
+        execution = _append_execution(
+            session, request, numeric_value=result.value, text_value=None, actor_id=actor_id,
+            notes=f"Cálculo automático · fórmula {rule.key} v{rule.version}.", raw_inputs_json=raw,
+        )
+        saved.append(rule.key)
+        executions[rule.key] = execution.id
+    if saved or invalidated:
+        session.add(AuditEvent(
+            entity_type="sample", entity_id=sample_id, action="calculations_updated", user_id=actor_id,
+            details_json=json.dumps({"executions": executions, "invalidated": invalidated,
+                                     "pending": pending, "formula_version": FORMULA_VERSION}),
+        ))
+    session.flush()
+    return CalculationUpdate(tuple(saved), tuple(pending))
+
+
+def save_calculations(
+    session: Session, sample_id: int, inputs: Mapping[str, Decimal | str | None], *, actor_id: int | None,
+    expected_snapshot: Mapping[str, int | None],
+) -> CalculationUpdate:
+    """Confirma °Brix e grava só cálculos solicitados, sem transformar uma simulação em medição."""
+    if session.get(Sample, sample_id) is None:
+        raise ValueError("Amostra não encontrada. Selecione novamente.")
+    if dict(expected_snapshot) != calculation_snapshot(session, sample_id):
+        raise ValueError("Os resultados ou leituras mudaram. Reabra a amostra e confira os cálculos.")
+    requests = _calculation_requests(session, sample_id)
+    if not any(r.parameter.kind == "calculated" and r.status in {"Pendente", "Concluída"}
+               and key in {rule.key for rule in FORMULAS} for key, r in requests.items()):
+        raise ValueError("Esta amostra não tem parâmetros calculados solicitados em aberto.")
+    values = {field: parse_input(field, inputs.get(field)) for field in INPUT_LABELS}
+    measured = _measured_values(requests)
+    if any(values[field] != measured[field] for field in MEASURED_INPUTS):
+        raise ValueError("Para gravar, use álcool e extrato aparente vigentes. Registre a medição em Resultados.")
+    previous, event_id = saved_brix(session, sample_id)
+    if previous != values["brix"] or event_id is None:
+        session.add(AuditEvent(
+            entity_type="sample", entity_id=sample_id, action=CALCULATION_INPUTS, user_id=actor_id,
+            details_json=json.dumps({"brix": str(values["brix"]) if values["brix"] is not None else None,
+                                     "formula_version": FORMULA_VERSION}),
+        ))
+        session.flush()
+    return refresh_calculated_results(session, sample_id, actor_id=actor_id)
+
+
+def add_execution(
+    session: Session, requested: RequestedAnalysis, *, numeric_value: Decimal | None,
+    text_value: str | None, notes: str | None, actor_id: int | None,
+) -> AnalysisExecution:
+    execution = _append_execution(
+        session, requested, numeric_value=numeric_value, text_value=text_value, notes=notes, actor_id=actor_id,
+    )
+    if requested.parameter.key in MEASURED_INPUTS:
+        refresh_calculated_results(session, requested.sample_id, actor_id=actor_id,
+                                   changed_field=requested.parameter.key)
     return execution
 
 

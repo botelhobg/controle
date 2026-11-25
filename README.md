@@ -1,4 +1,4 @@
-# LaBeer 0.7 — modo local e piloto no Streamlit Community Cloud
+# LaBeer 0.8 — modo local e piloto no Streamlit Community Cloud
 
 Aplicativo em Python e Streamlit. Cada pessoa acessa com seu próprio e-mail e senha. O modo local continua com SQLite. O modo **piloto privado** usa PostgreSQL e deve receber somente dados fictícios; veja [PILOTO_STREAMLIT.md](PILOTO_STREAMLIT.md). O pacote não inclui banco, planilha, laudos ou credenciais.
 
@@ -64,14 +64,18 @@ Abra `http://localhost:8501` no mesmo computador. Em Linux/macOS, use `python3.1
 
 Para conferir uma FQ no app, abra **Resultados → Histórico de resultados** e **Referências da planilha (não vigentes)**. Também é possível consultar as referências por código em **Amostras**.
 
-## 4. Calcular sem modificar os resultados
+## 4. Simular e salvar cálculos
 
-Abra **Cálculos** e selecione uma FQ para comparar com os valores vigentes, ou escolha **Simulação sem amostra**. O aplicativo sugere álcool e extrato aparente vigentes quando numéricos; não substitui esses valores por registros das abas de apoio. Uma leitura de °Brix importada é preenchida se houver um único valor disponível. Quando houver mais de um valor de °Brix, confira as origens e digite o valor correspondente ao ensaio. Você também pode digitar novas entradas para simular uma reanálise.
+Abra **Cálculos** e selecione uma FQ para comparar com os valores vigentes, ou escolha **Simulação sem amostra**. O aplicativo sugere álcool e extrato aparente vigentes quando numéricos; não substitui esses valores por registros das abas de apoio. Uma leitura de °Brix já confirmada no aplicativo é reaproveitada. Se ainda não houver leitura confirmada, uma leitura importada é sugerida somente quando não há ambiguidade. Confira que corresponde ao mesmo ensaio. Você também pode digitar novas entradas para simular uma reanálise, sem gravá-las.
 
 - Extrato real, original e calorias usam álcool (% v/v) e extrato aparente (°P).
 - Carboidratos exigem extrato aparente e °Brix; uma entrada em branco não vira zero. Extrato aparente é entrada, não é calculado neste bloco.
 - A prévia mostra o valor calculado sem arredondar. Calorias aparecem sem decimais na exibição para laudo, e carboidratos abaixo de 0,1 aparecem como `<0,1 g/100 mL`. Uma estimativa negativa continua visível na prévia, com aviso para revisar as entradas.
-- O cálculo é apenas uma prévia: não muda o valor vigente, não registra novas análises e não emite ou corrige laudos.
+- Em **Resultados**, salvar uma nova execução de álcool ou extrato aparente recalcula automaticamente os parâmetros dependentes **já solicitados**, dentro da mesma transação. Não cria análises, cobranças ou execuções de parâmetros independentes. A tela mostra o novo resultado imediatamente.
+- Para confirmar a leitura de °Brix e registrar os cálculos da FQ, clique em **Salvar cálculos da amostra**. A gravação usa apenas álcool e extrato aparente vigentes. Se você alterou esses campos para simular, primeiro registre a medição em **Resultados**. O botão não transforma simulações em medições.
+- Cada cálculo guarda valor sem arredondar, versão da fórmula, entradas, execuções de origem e responsável. Uma gravação idêntica não duplica o histórico. Leituras ou resultados alterados em outra sessão exigem nova conferência.
+- Entradas ausentes ou não numéricas deixam os cálculos dependentes pendentes, sem apagar execuções anteriores. Apagar o °Brix confirmado deixa carboidratos pendentes. O recálculo não altera glúten, shelf life ou PDFs emitidos, nem envia e-mails. Mudanças após a revisão de um laudo exigem nova revisão antes de emitir outra versão.
+- A simulação sem amostra nunca grava. A importação continua preservando resultados históricos, sem recálculo em lote.
 
 As equações, fontes e limites da verificação estão em [CALCULOS.md](CALCULOS.md).
 

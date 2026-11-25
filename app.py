@@ -217,6 +217,9 @@ elif page == "Amostras":
 
 elif page == "Resultados":
     st.header("Resultados e repetições")
+    result_notice = st.session_state.pop("result_notice", None)
+    if result_notice:
+        st.success(result_notice)
     with session_scope() as db:
         requested = db.scalars(
             select(RequestedAnalysis)
@@ -275,12 +278,15 @@ elif page == "Resultados":
                         execution = add_execution(db, req, numeric_value=value.numeric, text_value=value.textual,
                                                   notes=notes, actor_id=actor_id)
                         number = execution.execution_number
-                    st.success(f"Execução {number} registrada e selecionada como resultado atual.")
-                except (AccountError, SQLAlchemyError) as error:
+                    st.session_state["result_notice"] = (
+                        f"Execução {number} registrada e selecionada como resultado atual."
+                    )
+                    st.rerun()
+                except (ValueError, SQLAlchemyError) as error:
                     write_account_error(error)
 
 elif page == "Cálculos":
-    render_calculation_page()
+    render_calculation_page(grant)
 
 elif page == "Laudos":
     render_report_page(grant)

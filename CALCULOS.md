@@ -11,7 +11,9 @@ Transcrição das fórmulas da [planilha oficial do LaBeer](https://docs.google.
 | Calorias (kcal/100 mL) | 0,72 + 6,898 × A + 3,88 × EA | `Calc_Calorias!B2` |
 | Carboidratos (g/100 mL) | 1,03 − 0,202 × B + 0,739 × EA | `Calc_Carb!C2` |
 
-Extrato aparente entra como valor informado na planilha. O aplicativo não o estima a partir de °Brix nem reaproveita automaticamente extrato ou álcool de outra execução. Em amostras importadas, é possível conferir leituras de apoio com suas células de origem. Se usar uma delas na prévia, confirme que a leitura pertence ao ensaio que você está comparando.
+Extrato aparente é uma medição informada: o aplicativo não o estima a partir de °Brix. Ao registrar álcool ou extrato aparente, os cálculos dependentes solicitados usam as execuções vigentes, sem alterar os parâmetros independentes. Carboidratos usam somente uma leitura de °Brix explicitamente confirmada em **Salvar cálculos da amostra**. Em amostras importadas, as células de apoio são sugestões para conferência, não entradas implicitamente aprovadas.
+
+Os cálculos persistidos guardam entradas, identificadores das execuções usadas, responsável e versão da fórmula. Uma reanálise acrescenta execuções dependentes sem apagar as anteriores. Ausência, limites como `<10` e valores fora do domínio não são tratados como zero: o cálculo dependente fica pendente. Nenhum PDF emitido é reescrito. As simulações sem amostra e a importação dos resultados históricos continuam sem gravação de novos cálculos.
 
 A versão 0.3 reproduziu 113 valores das abas de cálculo com as entradas lidas nessas abas (34 extratos reais, 34 extratos originais, 30 valores de calorias e 15 de carboidratos). Também reproduziu 18 resultados consolidados de FQ68, FQ69, FQ70, FQ75 e FQ91 com as entradas vigentes, usando °Brix quando disponível.
 
